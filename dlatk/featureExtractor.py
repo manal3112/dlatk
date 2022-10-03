@@ -1179,7 +1179,7 @@ class FeatureExtractor(DLAWorker):
         return featureTableName
 
 
-    def add_emb_table(self, modelName, tokenizerName, modelClass=None, batchSize=dlac.GPU_BATCH_SIZE, aggregations = ['mean'], layersToKeep = [8,9,10,11], maxTokensPerSeg=255, noContext=True, layerAggregations = ['concatenate'], wordAggregations = ['mean'], keepMsgFeats = False, customTableName = None, valueFunc = lambda d: d):
+    def add_emb_table(self, modelName, tokenizerName, modelClass=None, batchSize=dlac.GPU_BATCH_SIZE, aggregations = ['mean'], layersToKeep = [8,9,10,11], noContext=True, layerAggregations = ['concatenate'], wordAggregations = ['mean'], keepMsgFeats = False, customTableName = None, valueFunc = lambda d: d, overlap = 0.0):
 
         from dlatk.transformer_embs import transformer_embeddings
         
@@ -1194,7 +1194,7 @@ class FeatureExtractor(DLAWorker):
         sent_table = self.corptable if sent_tok_onthefly else self.corptable+'_stoks'
         if sent_tok_onthefly: dlac.warn("WARNING: run --add_sent_tokenized on the message table to avoid tokenizing it every time you generate embeddings")
 
-        cf_embedding_generator = transformer_embeddings(modelName=modelName, tokenizerName=tokenizerName, layersToKeep=layersToKeep, aggregations=aggregations, layerAggregations=layerAggregations, wordAggregations=wordAggregations, maxTokensPerSeg=maxTokensPerSeg, batchSize=batchSize, noContext=noContext, customTableName=customTableName)
+        cf_embedding_generator = transformer_embeddings(modelName=modelName, tokenizerName=tokenizerName, layersToKeep=layersToKeep, aggregations=aggregations, layerAggregations=layerAggregations, wordAggregations=wordAggregations, batchSize=batchSize, noContext=noContext, customTableName=customTableName, overlap = overlap)
 
         layersToKeep = cf_embedding_generator.layersToKeep.tolist()
         
@@ -1323,7 +1323,6 @@ class FeatureExtractor(DLAWorker):
             #if cf_reps.shape[0] == 0:
                 #continue
 
-            #TODO: dumping embeddings to table/file.
 
             #TODO: Add progress bar for user and messages processed.
         

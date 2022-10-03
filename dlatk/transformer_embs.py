@@ -12,6 +12,7 @@
 import sys
 from typing import Optional, List
 import json
+import itertools
 from json import loads
 #from simplejson import loads
 import numpy as np
@@ -51,7 +52,7 @@ class sentenceTokenizer:
              print("warning: unable to import nltk.tree or nltk.corpus or nltk.data")
 
         self.sentDetector = nltk.data.load('tokenizers/punkt/english.pickle')
-
+        
     def __call__(self, messageRows):
         #Input: List of (msg Id, msg) pairs
         
@@ -70,7 +71,7 @@ class textTransformerInterface:
         self.sentTokenizer = sentenceTokenizer()
         self.msgIdSeen = set()
         self.transformerTokenizer = transformerTokenizer
-        self.maxTokensPerSeg = self.transformerTokenizer.max_len_sentences_pair//2
+        self.maxSeqLen = self.transformerTokenizer.max_len_sentences_pair
 
         self.tokenizationRule = self.findRule()
 
@@ -137,8 +138,8 @@ class textTransformerInterface:
                         #check for over the max length. Below code (loop) segments the messages based on the number of tokens
                         i = 0
                         while (i < len(sentsTok)):#while instead of for since array may change size
-                            if len(sentsTok[i]) > self.maxTokensPerSeg: #If the number of tokens is greater than maxTokenPerSeg in a Sentence, split it
-                                newSegs = [sentsTok[i][j:j+self.maxTokensPerSeg] for j in range(0, len(sentsTok[i]), self.maxTokensPerSeg)]
+                            if len(sentsTok[i]) > self.maxSeqLen: #If the number of tokens is greater than maxTokenPerSeg in a Sentence, split it
+                                newSegs = [sentsTok[i][j:j+self.maxSeqLen] for j in range(0, len(sentsTok[i]), self.maxSeqLen)]
                                 #TODO: Change this to 1 update per user
                                 #if not lengthWarned:
                                     #print ("AddEmb: Some segments are too long; splitting up; first example: %s" % str(newSegs))
@@ -147,17 +148,44 @@ class textTransformerInterface:
                                 i+=(len(newSegs) - 1)#skip ahead new segments
                             i+=1
 
+                        maxSeqsForModelInput = []
+                        currWinSeqs = []
+                        currWinTokens = 0
                         for i in range(len(sentsTok)):
-                            thisPair = sentsTok[i:i+2] #Give two sequences as input
+                            sentsToCarryOver = 0
+                            if self.maxSeqLen >= currWinTokens + len(sentsTok[i]):
+                                currWinSeqs.append(sentsTok[i])
+                                currWinTokens += len(sentsTok[i])
+                            # exceeds maxSeqLen (e.g. 512)
+                            else: 
+                                maxSeqsForModelInput.append(currWinSeqs)
+                                # Calculate how many sentences to be carried over based on overlap ratio provided
+                                sentsToCarryOver = int(np.ceil(len(currWinSeqs) * self.overlap))
+                                if sentsToCarryOver >= len(currWinSeqs):
+                                    sentsToCarryOver = 0
+                                msgId_seq.append(([message_id] + [len(seq) for seq in currWinSeqs], sentsToCarryOver))
+                                
+                                if sentsToCarryOver: # and (sentsToCarryOver < len(currWinSeqs))
+                                    currWinSeqs = currWinSeqs[-sentsToCarryOver:]
+                                    currWinTokens = len(list(itertools.chain(*currWinSeqs)))
+                                    if self.maxSeqLen >= currWinTokens + len(sentsTok[i]):
+                                        currWinSeqs.append(sentsTok[i])
+                                        currWinTokens += len(sentsTok[i])
+                                        continue
+                                    continue
+                                    # corner case: if overlapped + new sent doesn't fit then, drop overlap - start afresh
+                                currWinSeqs = [sentsTok[i]]
+                                currWinTokens = len(sentsTok[i])
+
+                        maxSeqsForModelInput.append(currWinSeqs)
+                        msgId_seq.append(([message_id] + [len(seq) for seq in currWinSeqs], sentsToCarryOver))
+
+                        for inpSeqs in maxSeqsForModelInput:
                             try:
-                                #thisPair = [self.transformerTokenizer.convert_tokens_to_string(i) for i in thisPair]
-                                encoded = self.transformerTokenizer.prepare_for_model(*[self.transformerTokenizer.convert_tokens_to_ids(i) for i in thisPair])
-                                #encoded = self.transformerTokenizer.encode_plus(thisPair[0], thisPair[1]) if len(thisPair)>1 else self.transformerTokenizer.encode_plus(thisPair[0])
+                                encoded = self.transformerTokenizer.prepare_for_model(*[self.transformerTokenizer.convert_tokens_to_ids(i) for i in inpSeqs])
                             except:
-                                #print(thisPair, message_id)
                                 print ("Message pair/ message unreadable. Skipping this....")
                                 continue
-                                #sys.exit(0)
                             
                             indexedToks = encoded['input_ids']
                             segIds = encoded['token_type_ids'] if 'token_type_ids' in encoded else None
@@ -166,12 +194,6 @@ class textTransformerInterface:
                             if 'token_type_ids' in encoded:
                                 token_type_ids.append(torch.tensor(segIds, dtype=torch.long))
                             attention_mask.append(torch.tensor([1]*len(indexedToks), dtype=torch.long))
-
-                            if len(thisPair)>1: #Collecting the sentence length of the pair along with their message IDs
-                                # If multiple sentences in a message, it will store the message_ids multiple times for aggregating emb later.
-                                msgId_seq.append([message_id, len(sentsTok[i]), len(sentsTok[i+1])])
-                            else:
-                                msgId_seq.append([message_id, len(sentsTok[i]), 0])
 
                             cfId_seq.append(cfId)
 
@@ -196,7 +218,7 @@ class transformer_embeddings:
     """
     #modelName, tokenizerName, modelClass=None, batchSize=dlac.GPU_BATCH_SIZE, aggregations = ['mean'], layersToKeep = [8,9,10,11], maxTokensPerSeg=255, noContext=True, layerAggregations = ['concatenate'], wordAggregations = ['mean'], keepMsgFeats = False, customTableName = None, valueFunc = lambda d: d
     
-    def __init__(self, modelName:str, tokenizerName:str=None, layersToKeep:List=[-1, -2, -3, -4], aggregations:List=['mean'], layerAggregations:List=['mean'], wordAggregations:List=['mean'], maxTokensPerSeg=None, batchSize:int=None, noContext=True, customTableName:str=None, savePath:str=None):
+    def __init__(self, modelName:str, tokenizerName:str=None, layersToKeep:List=[-1, -2, -3, -4], aggregations:List=['mean'], layerAggregations:List=['mean'], wordAggregations:List=['mean'], overlap:float = 0.0, batchSize:int=None, noContext=True, customTableName:str=None, savePath:str=None):
         
         self.groups_processed = 0
         self.groups = [] #run get_groups()
@@ -221,7 +243,7 @@ class transformer_embeddings:
             print (" unable to use CUDA (GPU) for BERT")
             self.cuda = False
         self.batchSize=batchSize
-        
+        self.overlap = overlap
         layersToKeep = self.parse_layers(layersToKeep)
         self.layersToKeep = np.array(layersToKeep, dtype='int')
 
